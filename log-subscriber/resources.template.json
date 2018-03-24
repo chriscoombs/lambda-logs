@@ -1,0 +1,174 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Log Subscriber Resources",
+  "Parameters": {
+    "DestinationArn": {
+      "Type": "String",
+      "Description": "Required: Log shipper ARN"
+    },
+    "FilterPattern": {
+      "Type": "String",
+      "Description": "Optional: filter pattern for log subscriber"
+    }
+  },
+  "Resources": {
+    "Function": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": "log-subscriber",
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": [
+              "\n",
+              [
+                "const AWS = require('aws-sdk'); // eslint-disable-line import/no-unresolved",
+                "",
+                "const cloudwatchlogs = new AWS.CloudWatchLogs();",
+                "",
+                "// Log shipper ARN",
+                "const {",
+                "  destinationArn",
+                "} = process.env;",
+                "",
+                "const isShippableLogGroup = (logGroupName, context) =>",
+                "  // Only subscribe to lambda log groups",
+                "  logGroupName.indexOf('/aws/lambda') > -1 &&",
+                "  // Ignore the log subscriber function's log group",
+                "  logGroupName !== context.logGroupName &&",
+                "  // Ignore if log shipping function is Lambda",
+                "  destinationArn.indexOf('arn:aws:lambda') > -1 ? logGroupName !== `/aws/lambda/${destinationArn.substring(destinationArn.indexOf(':function:') + 10).split(':')[0]}` : true;",
+                "",
+                "exports.handler = (event, context, callback) => {",
+                "  const {",
+                "    logGroupName,",
+                "  } = event.detail.requestParameters;",
+                "  if (isShippableLogGroup(logGroupName, context)) {",
+                "    const params = {",
+                "      destinationArn,",
+                "      filterName: 'log-shipper',",
+                "      filterPattern,",
+                "      logGroupName,",
+                "    };",
+                "    cloudwatchlogs.putSubscriptionFilter(params).promise()",
+                "      .then(() => callback(null))",
+                "      .catch((err) => {",
+                "        callback(err);",
+                "      });",
+                "  } else {",
+                "    callback(null);",
+                "  }",
+                "};"
+              ]
+            ]
+          }
+        },
+        "Handler": "index.handler",
+        "MemorySize": "128",
+        "Runtime": "nodejs6.10",
+        "Role": {
+          "Fn::GetAtt": [
+            "Role",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "destinationArn": {
+              "Ref": "DestinationArn"
+            },
+            "filterPattern": {
+              "Ref": "FilterPattern"
+            }
+          }
+        }
+      }
+    },
+    "Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "log-subscriber",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:PutSubscriptionFilter"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "Rule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "EventPattern": {
+          "source": [
+            "aws.logs"
+          ],
+          "detail-type": [
+            "AWS API Call via CloudTrail"
+          ],
+          "detail": {
+            "eventSource": [
+              "logs.amazonaws.com"
+            ],
+            "eventName": [
+              "CreateLogGroup"
+            ]
+          }
+        },
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::Sub": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:log-subscriber"
+            },
+            "Id": "log-subscriber"
+          }
+        ]
+      }
+    },
+    "Permission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "Function"
+        },
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "Rule",
+            "Arn"
+          ]
+        },
+        "Principal": "events.amazonaws.com"
+      }
+    }
+  }
+}
