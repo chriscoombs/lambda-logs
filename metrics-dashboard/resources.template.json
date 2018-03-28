@@ -1,0 +1,234 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Metric Dashboard Resources",
+  "Parameters": {
+    "DashboardName": {
+      "Type": "String",
+      "Description": "Required: Dashboard name"
+    },
+    "FunctionsBlacklist": {
+      "Type": "String",
+      "Description": "Optional: comma-separated list of function names to ignore"
+    },
+    "WidgetsBlacklist": {
+      "Type": "String",
+      "Description": "Optional: comma-separated list of widget names to ignore"
+    }
+  },
+  "Resources": {
+    "Function": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": "metrics-dashboard",
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": [
+              "\n",
+              [
+                "const AWS = require('aws-sdk'); // eslint-disable-line import/no-extraneous-dependencies",
+                "",
+                "const cloudwatch = new AWS.CloudWatch();",
+                "const lambda = new AWS.Lambda();",
+                "",
+                "const {",
+                "  dashboardName,",
+                "} = process.env;",
+                "",
+                "// Optional blacklists",
+                "const functionsBlacklist = (process.env.functionsBlacklist) ? process.env.functionsBlacklist.split(',') : [];",
+                "const widgetsBlacklist = (process.env.widgetsBlacklist) ? process.env.widgetsBlacklist.split(',') : [];",
+                "",
+                "const listFunctions = (functions = [], marker) => new Promise((resolve, reject) => {",
+                "  const params = (marker) ? { Marker: marker } : {};",
+                "  lambda.listFunctions(params).promise()",
+                "    .then((data) => {",
+                "      if (data.NextMarker) {",
+                "        resolve(listFunctions(functions.concat(data.Functions), data.NextMarker));",
+                "      } else {",
+                "        resolve(functions.concat(data.Functions));",
+                "      }",
+                "    })",
+                "    .catch((err) => {",
+                "      if (err.code === 'ThrottlingException' || err.code === 'TooManyRequestsException') {",
+                "        setTimeout(() => {",
+                "          resolve(listFunctions(functions, marker));",
+                "        }, 1000);",
+                "      } else {",
+                "        reject(err);",
+                "      }",
+                "    });",
+                "});",
+                "",
+                "const mergeDashboardWithFunctions = (dashboard, lambdaFunctions) => {",
+                "  const updatedDashboard = dashboard;",
+                "  const updatedWidgets = [];",
+                "  updatedDashboard.widgets.forEach((widget) => {",
+                "    if (widget.type === 'metric' && !widgetsBlacklist.includes(widget.properties.title)) {",
+                "      const metrics = [];",
+                "      const metricTemplate = widget.properties.metrics[0];",
+                "      if (metricTemplate[0] === 'AWS/Lambda' && metricTemplate.length > 3) {",
+                "        lambdaFunctions.forEach((lambdaFunction) => {",
+                "          const functionMetric = metricTemplate.slice(0);",
+                "          functionMetric[3] = lambdaFunction.FunctionName;",
+                "          metrics.push(functionMetric);",
+                "        });",
+                "        const updatedWidget = widget;",
+                "        updatedWidget.properties.metrics = metrics.slice(0, 100);",
+                "        updatedWidgets.push(updatedWidget);",
+                "      }",
+                "    }",
+                "  });",
+                "  return updatedDashboard;",
+                "};",
+                "",
+                "const handler = (event, context, callback) => {",
+                "  Promise.resolve()",
+                "    .then(() => Promise.all([",
+                "      cloudwatch.getDashboard({",
+                "        DashboardName: dashboardName,",
+                "      }).promise(),",
+                "      listFunctions(),",
+                "    ]))",
+                "    .then((data) => {",
+                "      const lambdaFunctions = data[1].filter(lambdaFunction => !functionsBlacklist.includes(lambdaFunction.FunctionName) && lambdaFunction.FunctionName !== context.functionName); // eslint-disable-line max-len",
+                "      const dashboardBody = mergeDashboardWithFunctions(JSON.parse(data[0].DashboardBody), lambdaFunctions); // eslint-disable-line max-len",
+                "      return cloudwatch.putDashboard({",
+                "        DashboardName: dashboardName,",
+                "        DashboardBody: JSON.stringify(dashboardBody),",
+                "      }).promise();",
+                "    })",
+                "    .then(() => {",
+                "      callback(null);",
+                "    })",
+                "    .catch((err) => {",
+                "      callback(err);",
+                "    });",
+                "};",
+                "",
+                "module.exports = {",
+                "  mergeDashboardWithFunctions,",
+                "  handler,",
+                "};"
+              ]
+            ]
+          }
+        },
+        "Handler": "index.handler",
+        "MemorySize": "128",
+        "Runtime": "nodejs6.10",
+        "Role": {
+          "Fn::GetAtt": [
+            "Role",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "dashboardName": {
+              "Ref": "DashboardName"
+            },
+            "functionsBlacklist": {
+              "Ref": "FunctionsBlacklist"
+            },
+            "widgetsBlacklist": {
+              "Ref": "WidgetsBlacklist"
+            }
+          }
+        },
+        "Timeout": "30"
+      }
+    },
+    "Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "metrics-dashboard",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudwatch:PutDashboard",
+                    "cloudwatch:GetDashboard",
+                    "lambda:ListFunctions"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "Rule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "EventPattern": {
+          "source": [
+            "aws.logs"
+          ],
+          "detail-type": [
+            "AWS API Call via CloudTrail"
+          ],
+          "detail": {
+            "eventSource": [
+              "logs.amazonaws.com"
+            ],
+            "eventName": [
+              "CreateLogGroup"
+            ]
+          }
+        },
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "Function",
+                "Arn"
+              ]
+            },
+            "Id": "metrics-dashboard"
+          }
+        ]
+      }
+    },
+    "Permission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "Function"
+        },
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "Rule",
+            "Arn"
+          ]
+        },
+        "Principal": "events.amazonaws.com"
+      }
+    }
+  }
+}
